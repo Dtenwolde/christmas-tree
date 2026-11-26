@@ -6,6 +6,8 @@
 #   ./tree.sh           as fast as that goes
 #   ./tree.sh 0.2       with a pause of 0.2 seconds after every frame
 #   ./tree.sh 0 100     a hundred frames, then stop
+#   DAY=7 ./tree.sh     as it will be on 7 December (the scene is an Advent calendar:
+#                       every day of December adds something; ./advent.sh has the day's trick)
 #
 # The tree is as big as the window allows and follows it when it is resized. Ctrl-C ends it.
 
@@ -17,7 +19,7 @@ frames="${2:-0}"
 command -v duckdb >/dev/null || { echo "tree.sh: duckdb is not on the PATH" >&2; exit 1; }
 [ -f "$sql" ] || { echo "tree.sh: tree.sql is not next to this script" >&2; exit 1; }
 [ -t 1 ] || { echo "tree.sh: this draws on a terminal. One frame: duckdb -list -noheader -f tree.sql" >&2; exit 1; }
-unset AI_AGENT                                  # (set by coding agents: DuckDB would print a table for them, not the picture)
+export DUCKDB_AGENT_MODE=0                      # (started by a coding agent, DuckDB 2 would write for the agent)
 
 restore() { printf '\033[?25h\033[?1049l'; }    # the cursor and the screen as they were
 trap restore EXIT
@@ -32,12 +34,16 @@ size
 wipe=$'s/$/\033[K/'                             # every line also wipes what an earlier frame left behind it
 frame=0
 while :; do
+    # (one thread: for a picture this small that is the fastest, and half the work)
+    set="SET threads = 1; SET VARIABLE rows = $rows; SET VARIABLE cols = $cols"
+    if [ -n "${DAY:-}" ]; then                  # pretend it is that day of December, at this time of day
+        set="$set; SET VARIABLE now = '$(date +%Y)-12-$(printf '%02d' "$DAY") $(date +%H:%M:%S)'"
+    fi
     printf '\033[H'                             # from the top, over the frame before
-    if (( rows < 21 || cols < 42 )); then
-        echo "The scene needs a window of at least 43 x 22 characters."
+    if (( rows < 22 || cols < 42 )); then
+        echo "The scene needs a window of at least 43 x 23 characters."
     else
-        # (one thread: for a picture this small that is the fastest, and half the work)
-        duckdb -list -noheader -c "SET threads = 1; SET VARIABLE rows = $rows; SET VARIABLE cols = $cols" -f "$sql" 2>&1
+        duckdb -list -noheader -c "$set" -f "$sql" 2>&1
     fi | sed "$wipe"
     printf '\033[J'                             # and nothing under it
     frame=$(( frame + 1 ))
