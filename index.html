@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Christmas tree, drawn by DuckDB</title>
+<meta name="description" content="A Christmas tree with twinkling lights, falling snow and a countdown: the result of one SQL query, run by DuckDB in your browser.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎄</text></svg>">
+<style>
+  html, body { height: 100%; margin: 0; }
+  body { background: #0b1020; color: #c8ccd4; overflow: hidden; display: flex; flex-direction: column; }
+  main { flex: 1; min-height: 0; display: flex; align-items: flex-end; justify-content: center; }
+  pre { margin: 0; font-family: ui-monospace, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace; line-height: 1.15; white-space: pre; }
+  #probe { position: absolute; visibility: hidden; }
+  .b { font-weight: bold; text-shadow: 0 0 0.45em currentColor; }
+  footer { font: 12px/1.5 system-ui, sans-serif; text-align: center; color: #6b7389; padding: 0.5em 1em; }
+  footer a { color: #8f9bb8; }
+</style>
+</head>
+<body>
+<main><pre id="tree">Fetching DuckDB&hellip;</pre></main>
+<pre id="probe" aria-hidden="true"></pre>
+<footer>One SQL query, run again for every frame by <span id="engine">DuckDB</span> in your browser. <a href="tree.sql">Read the query</a></footer>
+
+<script type="module">
+// The picture is the result of tree.sql, the same query that the terminal version (tree.sh)
+// runs: it draws the moment it is asked. Here DuckDB-Wasm runs it, in this page, many
+// times a second, and its ANSI colours become spans.
+import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev124.0/+esm';
+
+const tree = document.getElementById('tree'), probe = document.getElementById('probe');
+const FPS = 20;                                     // frames asked for per second
+
+// The 16 colours of a terminal, then the rest of its 256.
+const COLORS = ['#1d2433', '#e0403a', '#3fa34d', '#d7af5f', '#4f8fe6', '#c678dd', '#3fc1c9', '#c8ccd4',
+                '#566079', '#ff5f56', '#5fd75f', '#ffd75f', '#5fa8ff', '#ff7ae6', '#5ff0f0', '#ffffff'];
+function color(n) {
+  if (n < 16) return COLORS[n];
+  if (n >= 232) { const g = 8 + 10 * (n - 232); return `rgb(${g},${g},${g})`; }
+  const step = v => [0, 95, 135, 175, 215, 255][v];
+  n -= 16;
+  return `rgb(${step(Math.floor(n / 36))},${step(Math.floor(n / 6) % 6)},${step(n % 6)})`;
+}
+
+// "1;93" or "38;5;208": what a terminal would do with it.
+const styles = new Map();
+function style(codes) {
+  if (!styles.has(codes)) {
+    const c = codes.split(';').map(Number);
+    let ink = null, bold = false;
+    for (let k = 0; k < c.length; k++) {
+      if (c[k] === 1) bold = true;
+      else if (c[k] >= 30 && c[k] <= 37) ink = color(c[k] - 30);
+      else if (c[k] >= 90 && c[k] <= 97) ink = color(c[k] - 82);
+      else if (c[k] === 38 && c[k + 1] === 5) { ink = color(c[k + 2]); k += 2; }
+    }
+    styles.set(codes, ink || bold ? { ink, bold } : null);
+  }
+  return styles.get(codes);
+}
+
+// The lines of a frame as nodes: text in the colour that was set before it.
+function paint(lines) {
+  const frame = document.createDocumentFragment();
+  for (const line of lines) {
+    let now = null, span = null;
+    for (const [, codes, text] of line.matchAll(/\x1b\[([0-9;]*)m|([^\x1b]+)/g)) {
+      if (text === undefined) { now = style(codes); span = null; continue; }
+      if (!now) { frame.append(text); continue; }
+      if (!span) {
+        span = document.createElement('span');
+        if (now.ink) span.style.color = now.ink;
+        if (now.bold) span.className = 'b';
+        frame.append(span);
+      }
+      span.append(text);
+    }
+    frame.append('\n');
+  }
+  tree.replaceChildren(frame);
+}
+
+// How many rows and columns of text fit, at a size at which the smallest tree does.
+function room() {
+  const main = tree.parentElement, width = main.clientWidth, height = main.clientHeight;
+  const size = Math.max(7, Math.min(16, Math.floor(width / 44 / 0.61), Math.floor(height / 22 / 1.15)));
+  tree.style.fontSize = probe.style.fontSize = size + 'px';
+  probe.textContent = 'M'.repeat(100);
+  const box = probe.getBoundingClientRect();
+  return { rows: Math.floor(height / box.height), cols: Math.floor(width / (box.width / 100)) };
+}
+
+const two = n => String(n).padStart(2, '0');
+function clock() {                                  // the visitor's own time, for the countdown
+  const d = new Date();
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
+}
+
+try {
+  const sql = await (await fetch('tree.sql')).text();
+  const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles());
+  const script = URL.createObjectURL(new Blob([`importScripts("${bundle.mainWorker}");`], { type: 'text/javascript' }));
+  const db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), new Worker(script));
+  await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+  URL.revokeObjectURL(script);
+  const conn = await db.connect();
+  document.getElementById('engine').textContent = 'DuckDB ' + [...(await conn.query('SELECT version()')).getChildAt(0)][0];
+
+  // The query is told only what changed: the room there is, and the time once a second.
+  // The moment within the animation it takes from DuckDB's own clock.
+  let space = room(), told = {}, shown = '', frames = 0;
+  addEventListener('resize', () => { space = room(); });
+  async function tell(name, value) {
+    if (told[name] !== value) { told[name] = value; await conn.query(`SET VARIABLE ${name} = ${value}`); }
+  }
+  async function draw() {
+    const started = performance.now();
+    if (!document.hidden) {
+      await tell('rows', space.rows);
+      await tell('cols', space.cols);
+      await tell('now', `'${clock()}'`);
+      const lines = [...(await conn.query(sql)).getChildAt(0)];
+      const picture = lines.join('\n');
+      if (picture !== shown) { shown = picture; paint(lines); }      // (most frames change a few cells, some none)
+      document.documentElement.dataset.frames = ++frames;
+    }
+    setTimeout(draw, Math.max(0, 1000 / FPS - (performance.now() - started)));
+  }
+  await draw();
+} catch (error) {
+  tree.textContent = 'The tree could not be drawn here.\n\n' + error;
+  console.error(error);
+}
+</script>
+</body>
+</html>
